@@ -56,3 +56,36 @@ def test_corrupt_pdf_raises_parse_error(tmp_path):
     f.write_bytes(b"not a pdf")
     with pytest.raises(ParseError):
         parse_document(f)
+
+def test_pdf_repeated_header_footer_removed(tmp_path):
+    bodies = [
+        "Revenue grew strongly across all regions during the year.",
+        "The board approved the new dividend policy in March.",
+        "Operating costs declined after the warehouse consolidation.",
+        "Cash reserves remain sufficient for planned acquisitions.",
+    ]
+    p = tmp_path / "hf.pdf"
+    pdf = pymupdf.open()
+    for n, body in enumerate(bodies, start=1):
+        page = pdf.new_page()
+        page.insert_text((72, 40), "ACME Confidential Report 2024")
+        page.insert_text((72, 200), body)
+        page.insert_text((72, 800), f"Page {n} of 4")
+    pdf.save(p)
+    pdf.close()
+
+    segs = parse_document(p)
+    assert len(segs) == 4
+    for seg, body in zip(segs, bodies):
+        assert body in seg.text
+        assert "ACME" not in seg.text and "Page" not in seg.text
+
+
+def test_docx_without_headings_gets_paragraph_locator(tmp_path):
+    p = tmp_path / "plain.docx"
+    d = Document()
+    d.add_paragraph("First paragraph of a document that has no headings at all.")
+    d.add_paragraph("Second paragraph continues the same plain document text.")
+    d.save(p)
+    segs = parse_document(p)
+    assert [s.section for s in segs] == ["paras 1-2"]

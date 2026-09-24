@@ -1,3 +1,5 @@
+import pytest
+
 from docmind.chunking import chunk_segments
 from docmind.schemas import Segment
 
@@ -38,3 +40,7 @@ def test_chunk_ids_unique_and_citation():
     chunks = chunk_segments([seg(words(500))], max_words=100, overlap_words=20)
     assert len({c.chunk_id for c in chunks}) == len(chunks)
     assert chunks[0].citation == "a.pdf, p. 1"
+
+def test_overlap_must_be_smaller_than_max():
+    with pytest.raises(ValueError):
+        chunk_segments([seg(words(10))], max_words=10, overlap_words=10)

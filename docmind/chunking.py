@@ -17,6 +17,8 @@ def _split_long(words: list[str], max_words: int, overlap: int) -> list[str]:
 def chunk_segment(
     text: str, max_words: int = 180, overlap_words: int = 30
 ) -> list[str]:
+    if overlap_words >= max_words:
+        raise ValueError("overlap_words must be smaller than max_words")
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
 
     units: list[str] = []
