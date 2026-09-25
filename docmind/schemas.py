@@ -33,3 +33,11 @@ class Chunk(BaseModel):
         if self.section:
             return f"{self.doc_name}, § {self.section}"
         return self.doc_name
+
+
+class AnswerResult(BaseModel):
+    query: str
+    answer: str
+    abstained: bool
+    citations: list[str] = []
+    top_score: float | None = None  # best semantic score seen, for debugging/eval

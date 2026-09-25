@@ -238,6 +238,9 @@ def main(argv: list[str] | None = None) -> None:
     srch.add_argument("query")
     srch.add_argument("-k", type=int, default=5)
     srch.add_argument("--mode", choices=["hybrid", "semantic", "keyword"], default="hybrid")
+    ask = sub.add_parser("ask", help="ask a grounded question")
+    ask.add_argument("query")
+    ask.add_argument("-k", type=int, default=5)
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -257,6 +260,17 @@ def main(argv: list[str] | None = None) -> None:
             print(f"{d['doc_id']}  {d['n_chunks']:>4} chunks  {d['doc_name']}")
     elif args.cmd == "delete":
         print("deleted" if index.delete_document(args.doc_id) else "no such document")
+    elif args.cmd == "ask":
+        from .config import get_settings
+        from .llm import GeminiProvider
+        from .qa import answer_question
+
+        settings = get_settings()
+        llm = GeminiProvider(settings.gemini_api_key, settings.gemini_model)
+        result = answer_question(index, llm, args.query, k=args.k)
+        print(result.answer)
+        if result.citations:
+            print("\nSources: " + ", ".join(result.citations))
     else:
         for rank, h in enumerate(index.search(args.query, args.k, args.mode), start=1):
             sem = f"{h.semantic_score:.3f}" if h.semantic_score is not None else "-"

@@ -1,0 +1,33 @@
+import logging
+
+from .index import Index
+from .llm import LLMProvider
+from .schemas import AnswerResult
+
+log = logging.getLogger("docmind.qa")
+
+# Below this cosine similarity, retrieved chunks are treated as unrelated to
+# the question rather than weak evidence - tuned empirically, not a magic constant.
+MIN_RELEVANT_SCORE = 0.35
+NO_EVIDENCE_MSG = "I don't have enough information in the uploaded documents to answer that."
+
+
+def answer_question(
+    index: Index,
+    llm: LLMProvider,
+    query: str,
+    k: int = 5,
+    min_score: float = MIN_RELEVANT_SCORE,
+) -> AnswerResult:
+    hits = index.search(query, k=k, mode="hybrid")
+    top_score = max((h.semantic_score or 0.0) for h in hits) if hits else None
+
+    relevant = [h for h in hits if (h.semantic_score or 0.0) >= min_score]
+    if not relevant:
+        log.info("Abstaining: top_score=%s below threshold=%s", top_score, min_score)
+        return AnswerResult(query=query, answer=NO_EVIDENCE_MSG, abstained=True, top_score=top_score)
+
+    context = [(h.chunk.citation, h.chunk.text) for h in relevant]
+    answer = llm.generate_answer(query, context)
+    citations = sorted({h.chunk.citation for h in relevant})
+    return AnswerResult(query=query, answer=answer, abstained=False, citations=citations, top_score=top_score)
