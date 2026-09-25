@@ -8,8 +8,6 @@ from docmind.schemas import Chunk
 
 
 class FakeEmbedder:
-    """Deterministic bag-of-words hashing embedder: no model download in tests."""
-
     DIM = 64
 
     def _vec(self, text: str) -> np.ndarray:
@@ -24,6 +22,33 @@ class FakeEmbedder:
 
     def embed_query(self, query):
         return self._vec(query)[None, :]
+
+
+class FakeVectorStore:
+    """In-memory Pinecone stand-in: cosine search over stored vectors, no network."""
+
+    def __init__(self):
+        self._vecs: dict[str, np.ndarray] = {}
+        self._docs: dict[str, str] = {}
+
+    def upsert(self, ids, vectors, doc_ids):
+        for cid, v, d in zip(ids, vectors, doc_ids):
+            self._vecs[cid] = v
+            self._docs[cid] = d
+
+    def query(self, vector, top_k, doc_ids=None):
+        scored = [
+            (cid, float(np.dot(v, vector)))
+            for cid, v in self._vecs.items()
+            if not doc_ids or self._docs[cid] in doc_ids
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
+
+    def delete(self, ids):
+        for cid in ids:
+            self._vecs.pop(cid, None)
+            self._docs.pop(cid, None)
 
 
 TEXTS = [
@@ -44,7 +69,7 @@ def make_chunks(doc_id="d1", name="a.pdf", texts=TEXTS):
 
 @pytest.fixture
 def idx():
-    index = Index(FakeEmbedder(), ":memory:")
+    index = Index(FakeEmbedder(), FakeVectorStore(), ":memory:")
     index.add_chunks(make_chunks())
     return index
 
@@ -84,4 +109,4 @@ def test_fts_syntax_in_query_does_not_crash(idx):
 
 
 def test_empty_index_returns_nothing():
-    assert Index(FakeEmbedder(), ":memory:").search("anything") == []
+    assert Index(FakeEmbedder(), FakeVectorStore(), ":memory:").search("anything") == []

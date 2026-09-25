@@ -7,13 +7,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Literal, Protocol
 
-import faiss
 import numpy as np
 from pydantic import BaseModel
 
+from .config import get_settings
 from .ingest import ingest_file
 from .parsing import ParseError
 from .schemas import Chunk
+from .vector_store import VectorStore
 
 log = logging.getLogger("docmind.index")
 
@@ -52,9 +53,8 @@ CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
 END;
 """
 
-CHUNK_COLUMNS = "id, chunk_id, doc_id, doc_name, page, section, chunk_index, text, word_count, method"
+CHUNK_COLUMNS = "chunk_id, doc_id, doc_name, page, section, chunk_index, text, word_count, method"
 
-# Dropped from the keyword query; they only add noise to an OR-style BM25 match.
 STOPWORDS = frozenset(
     "a an and are as at be by did do does for from how in is it of on or that the this to "
     "was were what when where which who with".split()
@@ -70,50 +70,35 @@ class Embedder(Protocol):
 
 class Hit(BaseModel):
     chunk: Chunk
-    score: float  # ranking score: RRF (hybrid), cosine (semantic) or -bm25 (keyword)
-    semantic_score: float | None = None  # cosine similarity, filled for every hit unless mode=keyword
-    keyword_score: float | None = None  # -bm25, only if the chunk matched the keyword query
+    score: float
+    semantic_score: float | None = None
+    keyword_score: float | None = None
 
 
 class Index:
-    """SQLite is the single source of truth (chunks, FTS5 keyword index, embeddings).
-    FAISS is an in-memory exact index rebuilt from SQLite, so deletes and re-indexing
-    never leave the two stores out of sync."""
+    """SQLite holds chunk text, metadata, the FTS5 keyword index, and a local
+    embedding cache. Pinecone holds the same vectors as the managed semantic
+    store. SQLite stays the source of truth for text/citations; Pinecone is
+    swappable (interview point: only vector_store.py would change)."""
 
-    def __init__(self, embedder: Embedder, db_path: str | Path = DEFAULT_DB):
+    def __init__(self, embedder: Embedder, vector_store: VectorStore, db_path: str | Path = DEFAULT_DB):
         self.embedder = embedder
+        self.vector_store = vector_store
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(db_path))
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
-        self._faiss = None
-        self._row_ids: list[int] = []
-        self._row_docs: list[str] = []
-        self._rebuild()
-
-    # ---------- write path ----------
-    def _rebuild(self) -> None:
-        rows = self.db.execute("SELECT id, doc_id, embedding FROM chunks ORDER BY id").fetchall()
-        if not rows:
-            self._faiss, self._row_ids, self._row_docs = None, [], []
-            return
-        mat = np.vstack([np.frombuffer(r["embedding"], dtype=np.float32) for r in rows])
-        self._faiss = faiss.IndexFlatIP(mat.shape[1])
-        self._faiss.add(np.ascontiguousarray(mat))
-        self._row_ids = [r["id"] for r in rows]
-        self._row_docs = [r["doc_id"] for r in rows]
 
     def has_document(self, doc_id: str) -> bool:
         return self.db.execute("SELECT 1 FROM documents WHERE doc_id=?", (doc_id,)).fetchone() is not None
 
     def add_chunks(self, chunks: list[Chunk]) -> None:
-        """Index the chunks of ONE document."""
         if not chunks:
             return
         vecs = self.embedder.embed_passages([c.text for c in chunks]).astype(np.float32)
         first = chunks[0]
-        with self.db:  # single transaction: documents + chunks + FTS (via trigger)
+        with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO documents(doc_id, doc_name, n_chunks) VALUES (?,?,?)",
                 (first.doc_id, first.doc_name, len(chunks)),
@@ -127,11 +112,11 @@ class Index:
                     for c, v in zip(chunks, vecs)
                 ],
             )
-        self._rebuild()
+        self.vector_store.upsert(
+            ids=[c.chunk_id for c in chunks], vectors=vecs, doc_ids=[c.doc_id for c in chunks]
+        )
 
     def add_file(self, path: str | Path) -> tuple[str, int]:
-        """Parse, chunk, embed and index a file. Returns (doc_id, chunks_added);
-        chunks_added is 0 when the document was already indexed or has no extractable text."""
         segments, chunks = ingest_file(path)
         if not segments:
             raise ParseError(f"No content found in '{Path(path).name}'")
@@ -145,11 +130,13 @@ class Index:
         return doc_id, len(chunks)
 
     def delete_document(self, doc_id: str) -> bool:
+        rows = self.db.execute("SELECT chunk_id FROM chunks WHERE doc_id=?", (doc_id,)).fetchall()
+        chunk_ids = [r["chunk_id"] for r in rows]
         with self.db:
             cur = self.db.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
             self.db.execute("DELETE FROM documents WHERE doc_id=?", (doc_id,))
-        if cur.rowcount:
-            self._rebuild()
+        if chunk_ids:
+            self.vector_store.delete(chunk_ids)
         return cur.rowcount > 0
 
     def documents(self) -> list[sqlite3.Row]:
@@ -157,30 +144,16 @@ class Index:
             "SELECT doc_id, doc_name, n_chunks, added_at FROM documents ORDER BY added_at, doc_name"
         ).fetchall()
 
-    # ---------- read path ----------
-    def _semantic(self, qvec: np.ndarray, n: int, doc_ids: set[str] | None) -> list[tuple[int, float]]:
-        if self._faiss is None:
-            return []
-        # Flat index scores every row anyway, so with a doc filter we score all rows and filter after.
-        fetch = self._faiss.ntotal if doc_ids else min(n, self._faiss.ntotal)
-        scores, idx = self._faiss.search(qvec, fetch)
-        out: list[tuple[int, float]] = []
-        for s, i in zip(scores[0], idx[0]):
-            if i < 0 or (doc_ids and self._row_docs[i] not in doc_ids):
-                continue
-            out.append((self._row_ids[i], float(s)))
-            if len(out) >= n:
-                break
-        return out
+    def _semantic(self, qvec: np.ndarray, n: int, doc_ids: set[str] | None) -> list[tuple[str, float]]:
+        return self.vector_store.query(qvec[0], top_k=n, doc_ids=doc_ids)
 
-    def _keyword(self, query: str, n: int, doc_ids: set[str] | None) -> list[tuple[int, float]]:
+    def _keyword(self, query: str, n: int, doc_ids: set[str] | None) -> list[tuple[str, float]]:
         tokens = [t for t in re.findall(r"\w+", query.lower()) if t not in STOPWORDS]
         if not tokens:
             return []
-        # Quote every token so user input can never be parsed as FTS5 syntax.
         match = " OR ".join(f'"{t}"' for t in dict.fromkeys(tokens))
         sql = (
-            "SELECT c.id AS id, -bm25(chunks_fts) AS score FROM chunks_fts "
+            "SELECT c.chunk_id AS chunk_id, -bm25(chunks_fts) AS score FROM chunks_fts "
             "JOIN chunks c ON c.id = chunks_fts.rowid WHERE chunks_fts MATCH ?"
         )
         params: list = [match]
@@ -189,21 +162,21 @@ class Index:
             params += sorted(doc_ids)
         sql += " ORDER BY score DESC LIMIT ?"
         params.append(n)
-        return [(r["id"], float(r["score"])) for r in self.db.execute(sql, params)]
+        return [(r["chunk_id"], float(r["score"])) for r in self.db.execute(sql, params)]
 
-    def _cosines(self, qvec: np.ndarray, ids: list[int]) -> dict[int, float]:
-        if not ids:
+    def _cosines(self, qvec: np.ndarray, chunk_ids: list[str]) -> dict[str, float]:
+        if not chunk_ids:
             return {}
-        marks = ",".join("?" * len(ids))
-        rows = self.db.execute(f"SELECT id, embedding FROM chunks WHERE id IN ({marks})", ids)
-        return {r["id"]: float(np.dot(np.frombuffer(r["embedding"], dtype=np.float32), qvec[0])) for r in rows}
+        marks = ",".join("?" * len(chunk_ids))
+        rows = self.db.execute(f"SELECT chunk_id, embedding FROM chunks WHERE chunk_id IN ({marks})", chunk_ids)
+        return {r["chunk_id"]: float(np.dot(np.frombuffer(r["embedding"], dtype=np.float32), qvec[0])) for r in rows}
 
-    def _fetch_chunks(self, ids: list[int]) -> dict[int, Chunk]:
-        if not ids:
+    def _fetch_chunks(self, chunk_ids: list[str]) -> dict[str, Chunk]:
+        if not chunk_ids:
             return {}
-        marks = ",".join("?" * len(ids))
-        rows = self.db.execute(f"SELECT {CHUNK_COLUMNS} FROM chunks WHERE id IN ({marks})", ids)
-        return {r["id"]: Chunk(**{k: r[k] for k in r.keys() if k != "id"}) for r in rows}
+        marks = ",".join("?" * len(chunk_ids))
+        rows = self.db.execute(f"SELECT {CHUNK_COLUMNS} FROM chunks WHERE chunk_id IN ({marks})", chunk_ids)
+        return {r["chunk_id"]: Chunk(**dict(r)) for r in rows}
 
     def search(
         self,
@@ -213,8 +186,6 @@ class Index:
         doc_ids: list[str] | None = None,
         pool: int = 20,
     ) -> list[Hit]:
-        """Hybrid = reciprocal-rank fusion of the semantic and keyword top-`pool` lists.
-        RRF works on ranks, so it needs no score normalisation between cosine and BM25."""
         allowed = set(doc_ids) if doc_ids else None
         qvec = None
         if mode != "keyword":
@@ -228,20 +199,30 @@ class Index:
         elif mode == "keyword":
             ranked = kw
         else:
-            fused: dict[int, float] = defaultdict(float)
+            fused: dict[str, float] = defaultdict(float)
             for lst in (sem, kw):
                 for rank, (cid, _) in enumerate(lst, start=1):
                     fused[cid] += 1.0 / (RRF_K + rank)
             ranked = sorted(fused.items(), key=lambda x: x[1], reverse=True)
         ranked = ranked[:k]
 
-        if qvec is not None:  # cosine for every returned chunk (needed for abstention thresholds later)
+        if qvec is not None:
             sem_map.update(self._cosines(qvec, [cid for cid, _ in ranked if cid not in sem_map]))
         chunks = self._fetch_chunks([cid for cid, _ in ranked])
         return [
             Hit(chunk=chunks[cid], score=score, semantic_score=sem_map.get(cid), keyword_score=kw_map.get(cid))
             for cid, score in ranked
+            if cid in chunks
         ]
+
+
+def _build(db: str) -> Index:
+    from .embeddings import BgeEmbedder
+    from .vector_store import PineconeVectorStore
+
+    settings = get_settings()
+    vs = PineconeVectorStore(api_key=settings.pinecone_api_key, index_name=settings.pinecone_index)
+    return Index(BgeEmbedder(), vs, db)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -260,9 +241,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    from .embeddings import BgeEmbedder
-
-    index = Index(BgeEmbedder(), args.db)
+    index = _build(args.db)
 
     if args.cmd == "add":
         for path in args.paths:
