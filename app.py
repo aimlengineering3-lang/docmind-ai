@@ -82,7 +82,27 @@ if docs:
             text = index.document_text(doc_choice)
             try:
                 result = llm.extract_structured(text, SCHEMAS[doc_type])
-                st.json(result.model_dump())
+                data = result.model_dump()
+                line_items = data.pop("line_items", None)
+
+                cols = st.columns(2)
+                for i, (field, value) in enumerate(data.items()):
+                    label = field.replace("_", " ").title()
+                    cols[i % 2].metric(label, value if value not in (None, "") else "—")
+
+                if line_items:
+                    st.write("**Line items**")
+                    headers = list(line_items[0].keys())
+                    header_row = "| " + " | ".join(h.replace("_", " ").title() for h in headers) + " |"
+                    sep_row = "|" + "---|" * len(headers)
+                    rows = [
+                        "| " + " | ".join(str(item.get(h, "")) for h in headers) + " |"
+                        for item in line_items
+                    ]
+                    st.markdown("\n".join([header_row, sep_row, *rows]))
+
+                with st.expander("Raw JSON (validated Pydantic output)"):
+                    st.json(data | ({"line_items": line_items} if line_items else {}))
             except Exception as e:
                 st.error(f"Extraction failed: {e}")
 else:

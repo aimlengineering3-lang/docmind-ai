@@ -153,6 +153,12 @@ class Index:
         ).fetchall()
         return "\n\n".join(r["text"] for r in rows)
 
+    def document_text(self, doc_id: str) -> str:
+        rows = self.db.execute(
+            "SELECT text FROM chunks WHERE doc_id=? ORDER BY chunk_index", (doc_id,)
+        ).fetchall()
+        return "\n\n".join(r["text"] for r in rows)
+
     def documents(self) -> list[sqlite3.Row]:
         return self.db.execute(
             "SELECT doc_id, doc_name, n_chunks, added_at FROM documents ORDER BY added_at, doc_name"
