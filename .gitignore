@@ -3,4 +3,6 @@ __pycache__/
 .pytest_cache/
 data/
 *.gguf
-.env
+sample.pdf
+invoice.pdf
+resume.pdf.env
