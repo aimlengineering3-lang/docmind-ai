@@ -230,7 +230,7 @@ class Index:
         ]
 
 
-def _build(db: str) -> Index:
+def build_index(db: str = DEFAULT_DB) -> Index:
     from .embeddings import BgeEmbedder
     from .vector_store import PineconeVectorStore
 
@@ -261,7 +261,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    index = _build(args.db)
+    index = build_index(args.db)
 
     if args.cmd == "add":
         for path in args.paths:

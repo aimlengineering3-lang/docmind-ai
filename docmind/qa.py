@@ -11,6 +11,16 @@ log = logging.getLogger("docmind.qa")
 # the question rather than weak evidence - tuned empirically, not a magic constant.
 MIN_RELEVANT_SCORE = 0.35
 NO_EVIDENCE_MSG = "I don't have enough information in the uploaded documents to answer that."
+DECLINE_PHRASES = (
+    "does not contain", "don't have enough information", "cannot find",
+    "no information", "insufficient information",
+)
+
+
+def is_no_answer(result: AnswerResult) -> bool:
+    """True if the system produced no real answer - either it abstained before
+    calling the LLM (retrieval score too low), or the LLM itself declined."""
+    return result.abstained or any(p in result.answer.lower() for p in DECLINE_PHRASES)
 
 
 def answer_question(

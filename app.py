@@ -96,10 +96,9 @@ if st.button("Ask", type="primary") and query:
     with st.spinner("Retrieving evidence and generating answer..."):
         result = answer_question(index, llm, query)
 
-    no_answer_phrases = ("does not contain", "don't have enough information", "cannot find")
-    llm_declined = any(p in result.answer.lower() for p in no_answer_phrases)
+    from docmind.qa import is_no_answer
 
-    if result.abstained or llm_declined:
+    if is_no_answer(result):
         st.warning(result.answer)
     else:
         st.write(result.answer)

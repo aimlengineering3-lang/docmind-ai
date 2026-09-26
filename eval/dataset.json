@@ -1,0 +1,61 @@
+[
+  {
+    "id": "sample-payment",
+    "query": "When is payment due according to the agreement?",
+    "expected_doc": "sample.pdf",
+    "expected_keywords": ["30 days"]
+  },
+  {
+    "id": "sample-termination",
+    "query": "How many days notice is required to terminate the agreement?",
+    "expected_doc": "sample.pdf",
+    "expected_keywords": ["60 days"]
+  },
+  {
+    "id": "resume-email",
+    "query": "What is Ayesha's email address?",
+    "expected_doc": "resume.pdf",
+    "expected_keywords": ["ayesha.khan@example.com"]
+  },
+  {
+    "id": "resume-experience",
+    "query": "How many years of experience does Ayesha have?",
+    "expected_doc": "resume.pdf",
+    "expected_keywords": ["3 years"]
+  },
+  {
+    "id": "invoice-total",
+    "query": "What is the total amount on the invoice?",
+    "expected_doc": "invoice.pdf",
+    "expected_keywords": ["700"]
+  },
+  {
+    "id": "invoice-vendor",
+    "query": "Who is the vendor on the invoice?",
+    "expected_doc": "invoice.pdf",
+    "expected_keywords": ["Acme"]
+  },
+  {
+    "id": "paper-bleu",
+    "query": "What BLEU score does the Transformer big model achieve on WMT 2014 English-to-German translation?",
+    "expected_doc": "1706.03762v7.pdf",
+    "expected_keywords": ["28.4"]
+  },
+  {
+    "id": "paper-heads",
+    "query": "How many attention heads did they use in the base model?",
+    "expected_doc": "1706.03762v7.pdf",
+    "expected_keywords": ["8"]
+  },
+  {
+    "id": "paper-dropout",
+    "query": "What dropout rate was used for the base model?",
+    "expected_doc": "1706.03762v7.pdf",
+    "expected_keywords": ["0.1"]
+  },
+  {
+    "id": "abstention-check",
+    "query": "What is the capital of Japan?",
+    "should_abstain": true
+  }
+]
