@@ -1,4 +1,5 @@
 import logging
+import time
 
 from .index import Index
 from .llm import LLMProvider
@@ -19,7 +20,10 @@ def answer_question(
     k: int = 5,
     min_score: float = MIN_RELEVANT_SCORE,
 ) -> AnswerResult:
+    t0 = time.perf_counter()
     hits = index.search(query, k=k, mode="hybrid")
+    t1 = time.perf_counter()
+    log.info("Retrieval took %.2fs", t1 - t0)
     top_score = max((h.semantic_score or 0.0) for h in hits) if hits else None
 
     relevant = [h for h in hits if (h.semantic_score or 0.0) >= min_score]
@@ -29,5 +33,7 @@ def answer_question(
 
     context = [(h.chunk.citation, h.chunk.text) for h in relevant]
     answer = llm.generate_answer(query, context)
+    t2 = time.perf_counter()
+    log.info("Gemini generation took %.2fs", t2 - t1)
     citations = sorted({h.chunk.citation for h in relevant})
     return AnswerResult(query=query, answer=answer, abstained=False, citations=citations, top_score=top_score)

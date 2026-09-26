@@ -86,7 +86,7 @@ class Index:
         self.vector_store = vector_store
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(db_path))
+        self.db = sqlite3.connect(str(db_path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
 
@@ -96,7 +96,12 @@ class Index:
     def add_chunks(self, chunks: list[Chunk]) -> None:
         if not chunks:
             return
+        import time
+
+        t0 = time.perf_counter()
         vecs = self.embedder.embed_passages([c.text for c in chunks]).astype(np.float32)
+        t1 = time.perf_counter()
+        log.info("Embedding %d chunks took %.2fs", len(chunks), t1 - t0)
         first = chunks[0]
         with self.db:
             self.db.execute(
@@ -112,22 +117,25 @@ class Index:
                     for c, v in zip(chunks, vecs)
                 ],
             )
+        t2 = time.perf_counter()
         self.vector_store.upsert(
             ids=[c.chunk_id for c in chunks], vectors=vecs, doc_ids=[c.doc_id for c in chunks]
         )
+        log.info("Pinecone upsert took %.2fs", time.perf_counter() - t2)
 
-    def add_file(self, path: str | Path) -> tuple[str, int]:
+    def add_file(self, path: str | Path) -> tuple[str, int, str]:
+        """status is one of: 'indexed', 'duplicate', 'no_text' (likely scanned)."""
         segments, chunks = ingest_file(path)
         if not segments:
             raise ParseError(f"No content found in '{Path(path).name}'")
         doc_id = segments[0].doc_id
         if self.has_document(doc_id):
-            return doc_id, 0
+            return doc_id, 0, "duplicate"
         if not chunks:
             log.warning("'%s' has no extractable text (scanned? OCR comes later)", Path(path).name)
-            return doc_id, 0
+            return doc_id, 0, "no_text"
         self.add_chunks(chunks)
-        return doc_id, len(chunks)
+        return doc_id, len(chunks), "indexed"
 
     def delete_document(self, doc_id: str) -> bool:
         rows = self.db.execute("SELECT chunk_id FROM chunks WHERE doc_id=?", (doc_id,)).fetchall()
@@ -138,6 +146,12 @@ class Index:
         if chunk_ids:
             self.vector_store.delete(chunk_ids)
         return cur.rowcount > 0
+
+    def document_text(self, doc_id: str) -> str:
+        rows = self.db.execute(
+            "SELECT text FROM chunks WHERE doc_id=? ORDER BY chunk_index", (doc_id,)
+        ).fetchall()
+        return "\n\n".join(r["text"] for r in rows)
 
     def documents(self) -> list[sqlite3.Row]:
         return self.db.execute(
@@ -241,6 +255,9 @@ def main(argv: list[str] | None = None) -> None:
     ask = sub.add_parser("ask", help="ask a grounded question")
     ask.add_argument("query")
     ask.add_argument("-k", type=int, default=5)
+    ext = sub.add_parser("extract", help="structured extraction from a document")
+    ext.add_argument("doc_id")
+    ext.add_argument("doc_type", choices=["invoice", "resume", "contract"])
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -249,12 +266,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "add":
         for path in args.paths:
             try:
-                doc_id, n = index.add_file(path)
+                doc_id, n, status = index.add_file(path)
             except ParseError as e:
                 print(f"error: {e}")
                 continue
-            status = f"{n} chunks indexed" if n else "skipped (already indexed or no text)"
-            print(f"{Path(path).name} [{doc_id}]: {status}")
+            label = f"{n} chunks indexed" if status == "indexed" else status
+            print(f"{Path(path).name} [{doc_id}]: {label}")
     elif args.cmd == "list":
         for d in index.documents():
             print(f"{d['doc_id']}  {d['n_chunks']:>4} chunks  {d['doc_name']}")
@@ -271,6 +288,22 @@ def main(argv: list[str] | None = None) -> None:
         print(result.answer)
         if result.citations:
             print("\nSources: " + ", ".join(result.citations))
+    elif args.cmd == "extract":
+        from .config import get_settings
+        from .extraction import SCHEMAS
+        from .llm import GeminiProvider
+
+        text = index.document_text(args.doc_id)
+        if not text:
+            print("error: no such document, or it has no extracted text")
+            return
+        settings = get_settings()
+        llm = GeminiProvider(settings.gemini_api_key, settings.gemini_model)
+        try:
+            result = llm.extract_structured(text, SCHEMAS[args.doc_type])
+            print(result.model_dump_json(indent=2))
+        except Exception as e:
+            print(f"error: extraction failed ({e})")
     else:
         for rank, h in enumerate(index.search(args.query, args.k, args.mode), start=1):
             sem = f"{h.semantic_score:.3f}" if h.semantic_score is not None else "-"

@@ -108,5 +108,10 @@ def test_fts_syntax_in_query_does_not_crash(idx):
     idx.search('payment" OR ( NEAR', mode="keyword")
 
 
+def test_document_text_concatenates_in_order(idx):
+    text = idx.document_text("d1")
+    assert text.index("Payment is due") < text.index("terminate this agreement")
+
+
 def test_empty_index_returns_nothing():
     assert Index(FakeEmbedder(), FakeVectorStore(), ":memory:").search("anything") == []

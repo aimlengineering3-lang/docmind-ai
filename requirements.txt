@@ -8,3 +8,4 @@ sentence-transformers
 pinecone>=5.0
 google-genai
 pytest>=8.0
+streamlit>=1.38
